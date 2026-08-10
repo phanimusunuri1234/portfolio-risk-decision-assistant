@@ -121,107 +121,158 @@ if data.empty or len(data) < 30:
 # ─── CALCULATIONS ─────────────────────────────────────────────────────────────
 # ─── CALCULATIONS ─────────────────────────────────────────────────────────────
 
-returns = data.pct_change().dropna()
-
-# Keep only stocks that have valid downloaded price data
+# 1. Keep only selected stocks that have downloaded price data
 valid_tickers = [
-    stock for stock in portfolio.keys()
+    stock
+    for stock in portfolio.keys()
     if stock in data.columns
 ]
 
 if len(valid_tickers) < 2:
     st.error(
-        "Not enough valid stock price data was returned. "
-        "Please select different stocks and try again."
+        "Not enough selected stocks have valid market data. "
+        "Please select at least two stocks with available price data."
     )
     st.stop()
 
-# Align price data and portfolio stocks
-data = data[valid_tickers]
-returns = returns[valid_tickers]
+# 2. Keep exactly the same stocks everywhere
+data = data.loc[:, valid_tickers].copy()
 
-# Remove rows with missing values
-returns = data.pct_change()
-
-# Keep stocks that have enough valid historical observations
+# 3. Remove columns with insufficient price observations
 valid_tickers = [
-    stock for stock in portfolio.keys()
-    if stock in data.columns
-    and data[stock].notna().sum() >= 30
+    stock
+    for stock in valid_tickers
+    if data[stock].notna().sum() >= 30
 ]
 
 if len(valid_tickers) < 2:
     st.error(
-        "Not enough valid historical price data was returned. "
-        "Please try again or select different stocks."
+        "Not enough historical price data is available for the selected stocks."
     )
     st.stop()
 
-# Keep only valid portfolio stocks
-data = data[valid_tickers]
+data = data.loc[:, valid_tickers].copy()
 
-# Calculate returns
-returns = data.pct_change()
+# 4. Fill small missing gaps in price data
+data = data.ffill()
 
-# Remove only rows where all selected stocks are missing
-returns = returns.dropna(how="all")
+# Remove rows where all selected stocks are missing
+data = data.dropna(how="all")
 
-# Fill small gaps using the previous available price
-returns = returns.ffill().dropna()
+# 5. Latest available price for each stock
+latest_prices = data[valid_tickers].iloc[-1]
 
-if returns.empty:
-    st.error("Unable to calculate returns from the downloaded market data.")
+# Remove stocks whose latest price is unavailable
+valid_tickers = [
+    stock
+    for stock in valid_tickers
+    if pd.notna(latest_prices[stock])
+]
+
+if len(valid_tickers) < 2:
+    st.error(
+        "Not enough stocks have valid latest prices for portfolio analysis."
+    )
     st.stop()
 
-# Latest prices
+# Rebuild data using final stock list
+data = data.loc[:, valid_tickers].copy()
 latest_prices = data.iloc[-1]
 
-# Align quantities with the exact same stock order
-quantities = pd.Series(portfolio).reindex(valid_tickers)
+# 6. Quantities aligned exactly with stock order
+quantities = pd.Series(
+    portfolio,
+    dtype=float
+).reindex(valid_tickers)
 
-# Position value for each stock
+# 7. Portfolio position values
 position_values = latest_prices * quantities
 
-# Total current portfolio value
-portfolio_value = float(position_values.sum())
-
-if portfolio_value <= 0:
-    st.error("Portfolio value is zero. Check quantities.")
-    st.stop()
-
-# Portfolio weights
-weights = position_values / portfolio_value
-
-# Covariance matrix
-cov_matrix = returns.cov()
-
-# Force covariance matrix to use the same stocks and same order
-cov_matrix = cov_matrix.reindex(
-    index=valid_tickers,
-    columns=valid_tickers
+portfolio_value = float(
+    position_values.sum()
 )
 
-# Replace any remaining missing covariance values
-cov_matrix = cov_matrix.fillna(0)
+if portfolio_value <= 0:
+    st.error(
+        "Portfolio value is zero. Check quantities."
+    )
+    st.stop()
 
-# Portfolio variance
-w = weights.values.astype(float).reshape(-1, 1)
-cov_values = cov_matrix.values.astype(float)
+# 8. Portfolio weights
+weights = (
+    position_values / portfolio_value
+)
 
+# 9. Calculate daily returns
+returns = (
+    data[valid_tickers]
+    .pct_change()
+)
+
+# Remove rows with missing values
+returns = returns.dropna()
+
+if len(returns) < 30:
+    st.error(
+        "Not enough common historical observations are available "
+        "to calculate portfolio risk."
+    )
+    st.stop()
+
+# 10. Covariance matrix
+cov_matrix = returns.cov()
+
+# Force exact same order
+cov_matrix = cov_matrix.loc[
+    valid_tickers,
+    valid_tickers
+]
+
+# 11. Convert everything to NumPy arrays
+w = weights.loc[
+    valid_tickers
+].to_numpy(
+    dtype=float
+)
+
+cov_values = cov_matrix.loc[
+    valid_tickers,
+    valid_tickers
+].to_numpy(
+    dtype=float
+)
+
+# 12. Final dimension check
+if (
+    len(w) != cov_values.shape[0]
+    or len(w) != cov_values.shape[1]
+):
+    st.error(
+        "Portfolio weights and covariance matrix are not aligned."
+    )
+    st.stop()
+
+# 13. Portfolio variance
 portfolio_variance = float(
     w.T @ cov_values @ w
 )
 
-# Portfolio volatility
+# 14. Portfolio volatility
 portfolio_volatility = np.sqrt(
     max(portfolio_variance, 0)
 )
 
-# Portfolio return series
-portfolio_returns_series = returns.dot(weights)
-portfolio_mean = float(portfolio_returns_series.mean())
+# 15. Portfolio return series
+portfolio_returns_series = returns.dot(
+    weights.loc[valid_tickers]
+)
 
-# 95% Parametric VaR
+portfolio_mean = float(
+    portfolio_returns_series.mean()
+)
+
+# ─── 95% PARAMETRIC VAR ──────────────────────────────────────────────────────
+
 confidence_level = 1.65
 
 daily_var = max(
@@ -232,6 +283,139 @@ daily_var = max(
     0
 )
 
+# ─── RISK CONTRIBUTION ────────────────────────────────────────────────────────
+
+marginal = (
+    cov_values @ w
+)
+
+if portfolio_volatility > 0:
+
+    risk_contrib = (
+        w
+        * marginal
+        / portfolio_volatility
+    )
+
+else:
+
+    risk_contrib = np.zeros(
+        len(w)
+    )
+
+risk_contribution = pd.Series(
+    risk_contrib,
+    index=valid_tickers
+)
+
+if risk_contribution.sum() != 0:
+
+    risk_contribution_pct = (
+        risk_contribution
+        / risk_contribution.sum()
+    ) * 100
+
+else:
+
+    risk_contribution_pct = pd.Series(
+        0.0,
+        index=valid_tickers
+    )
+
+# ─── INDIVIDUAL STOCK VAR ─────────────────────────────────────────────────────
+
+individual_vars = []
+
+for stock in valid_tickers:
+
+    stock_volatility = returns[
+        stock
+    ].std()
+
+    stock_var = (
+        confidence_level
+        * stock_volatility
+        * float(weights[stock])
+        * portfolio_value
+    )
+
+    individual_vars.append(
+        stock_var
+    )
+
+diversification_benefit = (
+    sum(individual_vars)
+    - daily_var
+)
+
+# ─── SECTOR WEIGHTS ───────────────────────────────────────────────────────────
+
+sector_weights = {}
+
+for stock, wt in weights.items():
+
+    sector = sector_map.get(
+        stock,
+        "Other"
+    )
+
+    sector_weights[sector] = (
+        sector_weights.get(
+            sector,
+            0
+        )
+        + float(wt) * 100
+    )
+
+sector_df = pd.DataFrame({
+    "Sector": list(
+        sector_weights.keys()
+    ),
+    "Weight": [
+        round(v, 2)
+        for v in sector_weights.values()
+    ]
+})
+
+if not sector_df.empty:
+
+    top_sector = sector_df.loc[
+        sector_df["Weight"].idxmax(),
+        "Sector"
+    ]
+
+    top_sector_weight = float(
+        sector_df["Weight"].max()
+    )
+
+else:
+
+    top_sector = "Other"
+    top_sector_weight = 0.0
+
+# ─── PROFIT / LOSS ────────────────────────────────────────────────────────────
+
+current_pnl = (
+    portfolio_value
+    - invested_amount
+)
+
+pnl_pct = (
+    current_pnl
+    / invested_amount
+) * 100
+
+var_pct = (
+    daily_var
+    / portfolio_value
+) * 100
+
+# Optional profit wipe calculation
+# days_to_wipe = (
+#     abs(current_pnl) / daily_var
+#     if daily_var > 0 and current_pnl != 0
+#     else 999
+# )
 # ─── RISK CONTRIBUTION ────────────────────────────────────────────────────────
 
 marginal = cov_values @ weights.values
