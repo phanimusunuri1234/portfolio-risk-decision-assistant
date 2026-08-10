@@ -834,18 +834,128 @@ sim_data = load_prices(sim_tickers)
 
 if not sim_data.empty and len(sim_data) > 30:
 
-    sim_returns = sim_data.pct_change().dropna()
-    sim_latest = sim_data.iloc[-1]
-    sim_qty = pd.Series(simulated_portfolio)
-    sim_pos = sim_latest * sim_qty
-    sim_val = float(sim_pos.sum())
-    sim_wts = sim_pos / sim_val
-    sim_cov = sim_returns.cov()
-    sw = sim_wts.values.reshape(-1, 1)
-    sim_var_port = float(sw.T @ sim_cov.values @ sw)
-    sim_vol = np.sqrt(max(sim_var_port, 0))
-    sim_mean = float(sim_returns.dot(sim_wts).mean())
-    new_var = max((confidence_level * sim_vol - sim_mean) * sim_val, 0)
+        # ─── SIMULATED PORTFOLIO DATA ─────────────────────────────────────────────
+
+    sim_returns = sim_data.pct_change()
+
+    # Keep only stocks with valid price data
+    sim_valid_tickers = [
+        stock
+        for stock in sim_tickers
+        if stock in sim_data.columns
+        and sim_data[stock].notna().sum() >= 30
+    ]
+
+    if len(sim_valid_tickers) < 2:
+        st.warning(
+            "Not enough historical data is available for this simulation."
+        )
+    else:
+
+        # Keep exactly the same stocks everywhere
+        sim_data = sim_data.loc[:, sim_valid_tickers].copy()
+
+        # Fill small missing price gaps
+        sim_data = sim_data.ffill()
+
+        # Latest prices
+        sim_latest = sim_data.iloc[-1]
+
+        # Quantities in exactly the same order
+        sim_qty = pd.Series(
+            simulated_portfolio,
+            dtype=float
+        ).reindex(sim_valid_tickers)
+
+        # Position values
+        sim_pos = sim_latest * sim_qty
+
+        # Simulated portfolio value
+        sim_val = float(sim_pos.sum())
+
+        if sim_val <= 0:
+            st.warning("Simulated portfolio value is zero.")
+        else:
+
+            # Simulated portfolio weights
+            sim_wts = (
+                sim_pos / sim_val
+            )
+
+            # Returns
+            sim_returns = (
+                sim_data[sim_valid_tickers]
+                .pct_change()
+                .dropna()
+            )
+
+            if len(sim_returns) < 30:
+                st.warning(
+                    "Not enough common historical observations "
+                    "are available for this simulation."
+                )
+            else:
+
+                # Covariance matrix
+                sim_cov = sim_returns.cov()
+
+                # Force exact same order
+                sim_cov = sim_cov.loc[
+                    sim_valid_tickers,
+                    sim_valid_tickers
+                ]
+
+                # Convert to NumPy arrays
+                sw = sim_wts.loc[
+                    sim_valid_tickers
+                ].to_numpy(
+                    dtype=float
+                )
+
+                sim_cov_values = sim_cov.loc[
+                    sim_valid_tickers,
+                    sim_valid_tickers
+                ].to_numpy(
+                    dtype=float
+                )
+
+                # Safety check
+                if (
+                    len(sw) != sim_cov_values.shape[0]
+                    or len(sw) != sim_cov_values.shape[1]
+                ):
+                    st.error(
+                        "Simulation weights and covariance matrix are not aligned."
+                    )
+                else:
+
+                    # Simulated portfolio variance
+                    sim_var_port = float(
+                        sw.T
+                        @ sim_cov_values
+                        @ sw
+                    )
+
+                    # Simulated volatility
+                    sim_vol = np.sqrt(
+                        max(sim_var_port, 0)
+                    )
+
+                    # Simulated portfolio return
+                    sim_mean = float(
+                        sim_returns.dot(
+                            sim_wts.loc[sim_valid_tickers]
+                        ).mean()
+                    )
+
+                    # Simulated 95% VaR
+                    new_var = max(
+                        (
+                            confidence_level * sim_vol
+                            - sim_mean
+                        ) * sim_val,
+                        0
+                    )
     var_diff = new_var - daily_var
 
     new_sector = sector_map.get(new_stock, "Other")
