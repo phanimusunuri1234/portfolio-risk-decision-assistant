@@ -141,10 +141,36 @@ data = data[valid_tickers]
 returns = returns[valid_tickers]
 
 # Remove rows with missing values
-returns = returns.dropna()
+returns = data.pct_change()
+
+# Keep stocks that have enough valid historical observations
+valid_tickers = [
+    stock for stock in portfolio.keys()
+    if stock in data.columns
+    and data[stock].notna().sum() >= 30
+]
+
+if len(valid_tickers) < 2:
+    st.error(
+        "Not enough valid historical price data was returned. "
+        "Please try again or select different stocks."
+    )
+    st.stop()
+
+# Keep only valid portfolio stocks
+data = data[valid_tickers]
+
+# Calculate returns
+returns = data.pct_change()
+
+# Remove only rows where all selected stocks are missing
+returns = returns.dropna(how="all")
+
+# Fill small gaps using the previous available price
+returns = returns.ffill().dropna()
 
 if returns.empty:
-    st.error("Not enough historical price data is available for the selected stocks.")
+    st.error("Unable to calculate returns from the downloaded market data.")
     st.stop()
 
 # Latest prices
