@@ -119,63 +119,199 @@ if data.empty or len(data) < 30:
     st.stop()
 
 # ─── CALCULATIONS ─────────────────────────────────────────────────────────────
+# ─── CALCULATIONS ─────────────────────────────────────────────────────────────
+
 returns = data.pct_change().dropna()
+
+# Keep only stocks that have valid downloaded price data
+valid_tickers = [
+    stock for stock in portfolio.keys()
+    if stock in data.columns
+]
+
+if len(valid_tickers) < 2:
+    st.error(
+        "Not enough valid stock price data was returned. "
+        "Please select different stocks and try again."
+    )
+    st.stop()
+
+# Align price data and portfolio stocks
+data = data[valid_tickers]
+returns = returns[valid_tickers]
+
+# Remove rows with missing values
+returns = returns.dropna()
+
+if returns.empty:
+    st.error("Not enough historical price data is available for the selected stocks.")
+    st.stop()
+
+# Latest prices
 latest_prices = data.iloc[-1]
-quantities = pd.Series(portfolio)
+
+# Align quantities with the exact same stock order
+quantities = pd.Series(portfolio).reindex(valid_tickers)
+
+# Position value for each stock
 position_values = latest_prices * quantities
+
+# Total current portfolio value
 portfolio_value = float(position_values.sum())
 
 if portfolio_value <= 0:
     st.error("Portfolio value is zero. Check quantities.")
     st.stop()
 
+# Portfolio weights
 weights = position_values / portfolio_value
-cov_matrix = returns.cov()
-w = weights.values.reshape(-1, 1)
-portfolio_variance = float(w.T @ cov_matrix.values @ w)
-portfolio_volatility = np.sqrt(max(portfolio_variance, 0))
 
+# Covariance matrix
+cov_matrix = returns.cov()
+
+# Force covariance matrix to use the same stocks and same order
+cov_matrix = cov_matrix.reindex(
+    index=valid_tickers,
+    columns=valid_tickers
+)
+
+# Replace any remaining missing covariance values
+cov_matrix = cov_matrix.fillna(0)
+
+# Portfolio variance
+w = weights.values.astype(float).reshape(-1, 1)
+cov_values = cov_matrix.values.astype(float)
+
+portfolio_variance = float(
+    w.T @ cov_values @ w
+)
+
+# Portfolio volatility
+portfolio_volatility = np.sqrt(
+    max(portfolio_variance, 0)
+)
+
+# Portfolio return series
 portfolio_returns_series = returns.dot(weights)
 portfolio_mean = float(portfolio_returns_series.mean())
 
+# 95% Parametric VaR
 confidence_level = 1.65
-daily_var = max((confidence_level * portfolio_volatility - portfolio_mean) * portfolio_value, 0)
 
-marginal = cov_matrix.values @ weights.values
+daily_var = max(
+    (
+        confidence_level * portfolio_volatility
+        - portfolio_mean
+    ) * portfolio_value,
+    0
+)
+
+# ─── RISK CONTRIBUTION ────────────────────────────────────────────────────────
+
+marginal = cov_values @ weights.values
+
 if portfolio_volatility > 0:
-    risk_contrib = weights.values * marginal / portfolio_volatility
+    risk_contrib = (
+        weights.values
+        * marginal
+        / portfolio_volatility
+    )
 else:
     risk_contrib = np.zeros(len(weights))
 
-risk_contribution = pd.Series(risk_contrib, index=weights.index)
+risk_contribution = pd.Series(
+    risk_contrib,
+    index=weights.index
+)
+
 if risk_contribution.sum() != 0:
-    risk_contribution_pct = (risk_contribution / risk_contribution.sum()) * 100
+    risk_contribution_pct = (
+        risk_contribution
+        / risk_contribution.sum()
+    ) * 100
 else:
-    risk_contribution_pct = pd.Series(0, index=weights.index)
+    risk_contribution_pct = pd.Series(
+        0,
+        index=weights.index
+    )
+
+# ─── INDIVIDUAL STOCK VAR ─────────────────────────────────────────────────────
 
 individual_vars = []
-for stock in returns.columns:
+
+for stock in valid_tickers:
+
     sv = returns[stock].std()
-    stock_var = confidence_level * sv * float(weights[stock]) * portfolio_value
+
+    stock_var = (
+        confidence_level
+        * sv
+        * float(weights[stock])
+        * portfolio_value
+    )
+
     individual_vars.append(stock_var)
-diversification_benefit = sum(individual_vars) - daily_var
+
+diversification_benefit = (
+    sum(individual_vars) - daily_var
+)
+
+# ─── SECTOR WEIGHTS ───────────────────────────────────────────────────────────
 
 sector_weights = {}
+
 for stock, wt in weights.items():
+
     sector = sector_map.get(stock, "Other")
-    sector_weights[sector] = sector_weights.get(sector, 0) + float(wt) * 100
+
+    sector_weights[sector] = (
+        sector_weights.get(sector, 0)
+        + float(wt) * 100
+    )
+
 sector_df = pd.DataFrame({
     "Sector": list(sector_weights.keys()),
-    "Weight": [round(v, 2) for v in sector_weights.values()]
+    "Weight": [
+        round(v, 2)
+        for v in sector_weights.values()
+    ]
 })
 
-top_sector = sector_df.loc[sector_df["Weight"].idxmax(), "Sector"]
-top_sector_weight = sector_df["Weight"].max()
+if not sector_df.empty:
 
-current_pnl = portfolio_value - invested_amount
-pnl_pct = (current_pnl / invested_amount) * 100
-var_pct = (daily_var / portfolio_value) * 100
-# days_to_wipe = abs(current_pnl) / daily_var if daily_var > 0 and current_pnl != 0 else 999
+    top_sector = sector_df.loc[
+        sector_df["Weight"].idxmax(),
+        "Sector"
+    ]
+
+    top_sector_weight = sector_df["Weight"].max()
+
+else:
+
+    top_sector = "Other"
+    top_sector_weight = 0
+
+# ─── PROFIT / LOSS ────────────────────────────────────────────────────────────
+
+current_pnl = (
+    portfolio_value - invested_amount
+)
+
+pnl_pct = (
+    current_pnl
+    / invested_amount
+) * 100
+
+var_pct = (
+    daily_var
+    / portfolio_value
+) * 100
+
+# days_to_wipe = (
+#     abs(current_pnl) / daily_var
+#     if daily_var > 0 and current_pnl != 0
+#     else 999
+# )
 
 
 # ─── HEALTH SCORE ─────────────────────────────────────────────────────────────
